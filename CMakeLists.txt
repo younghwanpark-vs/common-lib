@@ -63,7 +63,7 @@ set(LINKS ${CMAKE_CURRENT_BINARY_DIR}
           ${CMAKE_CURRENT_BINARY_DIR}/Release
           ${LINKS})
 
-set(DEPENDENCIES FlatBuffers)
+# set(DEPENDENCIES FlatBuffers)
 
 file(GLOB_RECURSE SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 

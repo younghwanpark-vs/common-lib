@@ -42,6 +42,7 @@ private :
 #elif defined(LINUX)
     Priority _priority = {Policies::DEFAULT, Level::DEFAULT};
 #endif
+    std::string _name;
 
 public :
     ~ThreadDetail() noexcept final = default;
@@ -53,6 +54,7 @@ public :
         _thread = std::thread([this, work = std::move(func)]() 
         {
             set_priority(_priority);
+            set_name(_name);
             work();
             _promise.set_value();
         });
@@ -111,6 +113,16 @@ public :
     auto get_priority() const noexcept -> Priority override
     {
         return _priority;
+    }
+
+    auto set_name(const std::string& name) noexcept -> void
+    {
+        _name = name;
+    }
+
+    auto get_name() const noexcept -> const std::string&
+    {
+        return _name;
     }
 };
 } // namespace detail

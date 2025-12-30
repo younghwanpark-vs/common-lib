@@ -169,6 +169,9 @@ public :
      * @return The current priority of the thread.
      */
     virtual auto get_priority() const noexcept -> Priority = 0;
+
+    virtual auto set_name(const std::string& name) noexcept -> void = 0;
+    virtual auto get_name() const noexcept -> const std::string& = 0;
 };
 
 namespace base
@@ -176,10 +179,12 @@ namespace base
 class ThreadInterface
 {
 public :
-    virtual auto start() -> std::future<void> = 0;
+    virtual auto run() -> std::future<void> = 0;
     virtual auto stop() noexcept -> void = 0;
     virtual auto set_priority(const Thread::Priority& priority) noexcept -> bool = 0;
     virtual auto get_priority() const noexcept -> Thread::Priority = 0;
+    virtual auto set_name(const std::string& name) noexcept -> void = 0;
+    virtual auto get_name() const noexcept -> const std::string& = 0;
 };
 } // namespace base
 } // namespace common

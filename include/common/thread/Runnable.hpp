@@ -30,6 +30,7 @@ SOFTWARE.
 #include "common/NonCopyable.hpp"
 
 #include <vector>
+#include <atomic>
 
 namespace common
 {
@@ -46,7 +47,14 @@ class Runnable : public base::ThreadInterface,
 {
 private :
     std::shared_ptr<Thread> _t;
-    bool _running = false;
+    std::atomic<bool> _running{false};
+
+#if defined(WIN32)
+    Thread::Priority _priority = Thread::Policies::DEFAULT;
+#elif defined(LINUX)
+    Thread::Priority _priority = {Thread::Policies::DEFAULT, Thread::Level::DEFAULT};
+#endif
+    std::string _name;
 
 public :
     /**
@@ -57,14 +65,16 @@ public :
      * @return std::future which is set when thread is finished.
      * @throw common::exception::AlreadyRunningException if run() is called multiple times.
      */
-    auto start() -> std::future<void> override
+    auto run() -> std::future<void> override
     {
-        if(_running) throw AlreadyRunningException(); 
-        _running = true;
+        if(_running.load()) throw AlreadyRunningException(); 
+        _running.store(true);
 
         _t = Thread::create();
+        _t->set_priority(_priority);
+        _t->set_name(_name);
         return _t->start([this](){            
-            while(_running) { __work(); }
+            while(_running.load()) { __work(); }
         });
     }
 
@@ -78,14 +88,14 @@ public :
      * Once stop() is called, status() will return false.
      * If the thread has already been stopped or was never started, this function does nothing.
      */
-    inline auto stop() noexcept -> void override { _running = false; }
+    inline auto stop() noexcept -> void override { _running.store(false); }
 
     /**
      * @brief Check if run() is called and the thread is running.
      * 
      * @return true if run() is called and the thread is running, false otherwise.
      */
-    inline auto status() const noexcept -> bool { return _running; }
+    inline auto status() const noexcept -> bool { return _running.load(); }
 
     /**
      * @brief Sets the priority of the thread.
@@ -97,7 +107,9 @@ public :
      */
     inline auto set_priority(const Thread::Priority& priority) noexcept -> bool override
     {
-        return _t->set_priority(priority);
+        _priority = priority;
+        if(_running.load()) return _t->set_priority(priority);
+        else return false;
     }
 
     /**
@@ -109,7 +121,33 @@ public :
      */
     inline auto get_priority() const noexcept -> Thread::Priority override
     {
-        return _t->get_priority();
+        return _priority;
+    }
+
+    /**
+     * @brief Sets the name of the thread.
+     * 
+     * This method is used to set the name of the thread for identification and debugging purposes.
+     * If the thread is already running, the name is applied to the underlying thread immediately.
+     * 
+     * @param name The new name of the thread.
+     */
+    inline auto set_name(const std::string& name) noexcept -> void override
+    {
+        _name = name;
+        if(_running.load()) _t->set_name(name);
+    }
+
+    /**
+     * @brief Gets the current name of the thread.
+     * 
+     * This method is used to get the current name of the thread.
+     * 
+     * @return The current name of the thread.
+     */
+    inline auto get_name() const noexcept -> const std::string& override
+    {
+        return _name;
     }
 
 protected :
@@ -124,27 +162,80 @@ protected :
     virtual auto __work() -> void = 0;
 };
 
+namespace base
+{
+template <typename DataType, typename ReturnType>
+class WorkInterface
+{
+public :
+    virtual ~WorkInterface() = default;
+    virtual auto __work(DataType&& data) -> ReturnType = 0;
+};
+
+template <typename DataType>
+class WorkInterface<DataType, void>
+{
+public :
+    virtual ~WorkInterface() = default;
+    virtual auto __work(DataType&& data) -> void = 0;
+};
+
+template <typename ReturnType>
+class WorkInterface<void, ReturnType>
+{
+public :
+    virtual ~WorkInterface() = default;
+    virtual auto __work() -> ReturnType = 0;
+};
+
+template <>
+class WorkInterface<void, void>
+{
+public :
+    virtual ~WorkInterface() = default;
+    virtual auto __work() -> void = 0;
+};
+} // namespace base
+
 /**
- * @brief Represents a task that can be executed in a separate thread and is cancellable.
+ * @brief Represents a task that can be executed in a separate thread with data notification support.
  *
- * This class represents a task that can be executed in a separate thread and is cancellable.
- * It provides a way to create and manage threads, allowing for concurrent execution of tasks.
+ * This class represents a task that can be executed in a separate thread and is triggered by notifications.
+ * It provides a way to create and manage threads, allowing for concurrent execution of tasks with data passing.
+ * The thread waits for notify() calls and executes __work() with the provided data.
  * The task can be stopped by calling stop(), and the thread started by run() will be stopped.
  * If the task is stopped, status() will return false.
  *
- * @note A derived class must implement the pure virtual function __work() to execute a task.
+ * @tparam DataType The type of data to be passed to __work(). Use void for no input data.
+ * @tparam ReturnType The return type of __work(). Use void for no return value.
+ *
+ * @note A derived class must implement the pure virtual function __work() from base::WorkInterface to execute a task.
  */
-template <typename DataType>
+template <typename DataType, typename ReturnType>
 class ActiveRunnable : public base::ThreadInterface,
+                       public base::WorkInterface<DataType, ReturnType>,
                        public NonCopyable
 {
 private :
     std::shared_ptr<Thread> _t;
-    bool _running = false;
+    std::atomic<bool> _running{false};
 
     std::mutex _notifyLock;
     std::condition_variable _cv;
-    std::vector<DataType> _datas;
+
+    using PromiseType = std::shared_ptr<std::promise<ReturnType>>;
+    using TaskType = std::conditional_t<std::is_void_v<DataType>,
+                                        PromiseType,
+                                        std::pair<DataType, PromiseType>>;
+
+    std::vector<TaskType> _tasks;
+
+#if defined(WIN32)
+    Thread::Priority _priority = Thread::Policies::DEFAULT;
+#elif defined(LINUX)
+    Thread::Priority _priority = {Thread::Policies::DEFAULT, Thread::Level::DEFAULT};
+#endif
+    std::string _name;
 
 public :
     /**
@@ -155,50 +246,104 @@ public :
      * @return std::future which is set when thread is finished.
      * @throw common::exception::AlreadyRunningException if run() is called multiple times.
      */
-    auto start() -> std::future<void> override
+    auto run() -> std::future<void> override
     {
-        if(_running) throw AlreadyRunningException();
-        _running = true;
+        if(_running.load()) throw AlreadyRunningException();
+        _running.store(true);
 
         _t = Thread::create();
+        _t->set_priority(_priority);
+        _t->set_name(_name);
         return _t->start([this](){
-            while(_running)
+            while(_running.load())
             {
                 std::unique_lock<std::mutex> lock(_notifyLock);
-                if(_datas.empty()) _cv.wait(lock);
-                if(!_running) break;
+                if(_tasks.empty()) _cv.wait(lock);
+                if(!_running.load()) break;
 
-                DataType data = _datas[0];
-                _datas.erase(_datas.begin());
+                auto task = _tasks[0];
+                _tasks.erase(_tasks.begin());
                 lock.unlock();
 
-                __work(std::move(data));
+                if constexpr (std::is_void_v<DataType> && std::is_void_v<ReturnType>)
+                {
+                    this->__work();
+                    task->set_value();
+                }
+                else if constexpr (std::is_void_v<DataType>)
+                {
+                    auto promise = task;
+                    promise->set_value(this->__work());
+                }
+                else if constexpr (std::is_void_v<ReturnType>)
+                {
+                    auto data = std::get<0>(task);
+                    auto promise = std::get<1>(task);
+                    this->__work(std::move(data));
+                    promise->set_value();
+                }
+                else
+                {
+                    auto data = std::get<0>(task);
+                    auto promise = std::get<1>(task);
+                    promise->set_value(this->__work(std::move(data)));
+                }
             }
         });
     }
 
     /**
-     * @brief Notify the thread to execute __work() with the data.
+     * @brief Notify the thread to execute work() with the data.
      *
-     * @param data Data to be passed to __work()
+     * @param data Data to be passed to work()
      */
-    auto notify(const DataType& data) noexcept -> void
+    template<typename T = DataType>
+    auto notify(const T& data) noexcept -> std::enable_if_t<!std::is_void_v<T>, std::future<ReturnType>>
     {
+        PromiseType promise = std::make_shared<std::promise<ReturnType>>();
+        auto future = promise->get_future();
+
         std::unique_lock<std::mutex> lock(_notifyLock);
-        _datas.push_back(data);
+        _tasks.push_back({data, std::move(promise)});
         _cv.notify_one();
+
+        return future;
     }
 
     /**
-     * @brief Notify the thread to execute __work() with the data.
+     * @brief Notify the thread to execute work() with the data.
      *
-     * @param data Data to be passed to __work()
+     * @param data Data to be passed to work()
      */
-    auto notify(DataType&& data) noexcept -> void
+    template<typename T = DataType>
+    auto notify(const T&& data) noexcept -> std::enable_if_t<!std::is_void_v<T>, std::future<ReturnType>>
     {
+        PromiseType promise = std::make_shared<std::promise<ReturnType>>();
+        auto future = promise->get_future();
+
         std::unique_lock<std::mutex> lock(_notifyLock);
-        _datas.push_back(std::move(data));
+        _tasks.push_back({std::move(data), std::move(promise)});
         _cv.notify_one();
+
+        return future;
+    }
+
+    /**
+     * @brief Notify the thread to execute work() with the data.
+     *
+     * @param data Data to be passed to work()
+     */
+    template<typename T = DataType>
+    auto notify() noexcept -> std::enable_if_t<std::is_void_v<T>, std::future<ReturnType>>
+    {
+        PromiseType promise = std::make_shared<std::promise<ReturnType>>();
+        auto future = promise->get_future();
+
+        std::unique_lock<std::mutex> lock(_notifyLock);
+        _tasks.push_back(std::move(promise));
+        _cv.notify_one();
+
+        return future;
     }
 
     /**
@@ -214,7 +359,7 @@ public :
     auto stop() noexcept -> void override
     {
         std::unique_lock<std::mutex> lock(_notifyLock);
-        _running = false;
+        _running.store(false);
         _cv.notify_one();
     }
 
@@ -223,7 +368,7 @@ public :
      * 
      * @return true if run() is called and the thread is running, false otherwise.
      */
-    inline auto status() const noexcept -> bool { return _running; }
+    inline auto status() const noexcept -> bool { return _running.load(); }
 
     /**
      * @brief Sets the priority of the thread.
@@ -235,7 +380,9 @@ public :
      */
     inline auto set_priority(const Thread::Priority& priority) noexcept -> bool override
     {
-        return _t->set_priority(priority);
+        _priority = priority;
+        if(_running.load()) return _t->set_priority(priority);
+        else return false;
     }
 
     /**
@@ -247,20 +394,33 @@ public :
      */
     inline auto get_priority() const noexcept -> Thread::Priority override
     {
-        return _t->get_priority();
+        return _priority;
     }
 
-protected :
     /**
-     * @brief This function is called by run() in the thread created by run() with the data that is passed by notify() function.
+     * @brief Sets the name of the thread.
      * 
-     * This function should be implemented by the derived classes.
-     * This function is called continuously until stop() is called or an exception is thrown.
-     * If an exception is thrown, run() will catch it and set the future returned by run() to the exception.
-     * If stop() is called, this function will return immediately.
-     *
-     * @param data Data to be passed to __work()
+     * This method is used to set the name of the thread for identification and debugging purposes.
+     * If the thread is already running, the name is applied to the underlying thread immediately.
+     * 
+     * @param name The new name of the thread.
      */
-    virtual auto __work(DataType&& data) -> void = 0;
+    inline auto set_name(const std::string& name) noexcept -> void override
+    {
+        _name = name;
+        if(_running.load()) _t->set_name(name);
+    }
+
+    /**
+     * @brief Gets the current name of the thread.
+     * 
+     * This method is used to get the current name of the thread.
+     * 
+     * @return The current name of the thread.
+     */
+    inline auto get_name() const noexcept -> const std::string& override
+    {
+        return _name;
+    }
 };
 } // namespace common

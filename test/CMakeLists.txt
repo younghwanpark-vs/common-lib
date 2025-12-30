@@ -2,9 +2,9 @@ set(TARGET_NAME test-${TARGET_NAME})
 project(${TARGET_NAME})
 
 include(../cmake/CommonLib.cmake)
-compile_flatbuffer_schemas(${TARGET_NAME}
-                          "${CMAKE_CURRENT_SOURCE_DIR}/schema"
-                          "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# compile_flatbuffer_schemas(${TARGET_NAME}
+#                           "${CMAKE_CURRENT_SOURCE_DIR}/schema"
+#                           "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 file(GLOB_RECURSE SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 

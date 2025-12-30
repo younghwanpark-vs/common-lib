@@ -7,4 +7,4 @@ if (UNIX)
 endif()
 
 add_subdirectory(googletest)
-add_subdirectory(flatbuffers)
+# add_subdirectory(flatbuffers)
